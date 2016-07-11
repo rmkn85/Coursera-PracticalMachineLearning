@@ -1,0 +1,212 @@
+---
+title: "Practical Machine Learning Project"
+author: "Romi Kuntsman"
+date: "July 9, 2016"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r}
+# rendering options
+knitr::opts_chunk$set(echo = TRUE, cache = FALSE)
+```
+
+# Introduction
+
+One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, my goal was to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly (marked as "A") and incorrectly in 5 different ways (marked "B" to "F").
+
+Specifically, as part of the Coursera final project assignment, I needed to build a prediction model from that data, and also answer the following questions:
+
+1. How the model was build
+2. How cross validation was used
+3. What the expected out of sample error is
+4. Why different choices were made
+5. Use the model to predict 20 different test cases
+
+# Preparations
+
+## Prerequisites
+
+Since we're dealing with sophisticated machine learning algorithms, whose implementaion may change slightly between versions, we'll load all the libraries in advance and show the environment information and all libraries used. This will help the reproducibility of the experiment.
+We will also set a constant random seed, to make sure the all randomized calculations are the same for every execution.
+
+```{r results='hide'}
+# libraries
+library("corrplot")
+library("lattice")
+library("ggplot2")
+library("caret")
+library("randomForest")
+
+# set contact random seed
+set.seed(1560706)
+```
+
+```{r}
+# show environment information
+print(sessionInfo())
+```
+
+## Loading the Data
+
+```{r cars code_folding:hide}
+read_remote_csv <- function(src_url_prefix, file_name){
+  data_dir = "./data/"
+  dir.create(data_dir, showWarnings = FALSE)
+  dest_file = paste0(data_dir, file_name);
+  src_url = paste0(src_url_prefix, file_name);
+  
+  if (!file.exists(dest_file)) {
+    download.file(url = src_url, destfile = dest_file, method="curl")
+  }
+  # some columns have empty data with empty string and some with "NA" string
+  # we want to treat both of these as N/A so they can be removed when subsetting
+  return (read.csv(dest_file, sep = ",", strip.white = TRUE, na.strings = c("", " ", "NA")))
+}
+
+data_url_prefix = "https://d396qusza40orc.cloudfront.net/predmachlearn/"
+
+training_data_raw = read_remote_csv(data_url_prefix, "pml-training.csv")
+test_data_raw = read_remote_csv(data_url_prefix, "pml-testing.csv")
+```
+
+```{r}
+dim(training_data_raw)
+```
+
+```{r}
+dim(test_data_raw)
+```
+
+
+## Cleaning the Data
+
+The dataset contains multiple measurements per window, grouped with the "num_window" column, and summarized in one ending row with "new_window"=true.
+Our goal in this project is to build a predictor of activity based on a single row of measurement. Therefore we'll first remove the summary rows, and then remove columns which otherwise appear only in the summary rows, and columns with very high cardinality (such as timestamps) or very low cardinality (such as window numbers and user names).
+We will use the training data to choose the column set, and then take these columns from both the training and test sets.
+
+```{r}
+# remove window summary rows which contain different columns than we want
+training_data_nowindowsum = subset(training_data_raw, new_window=="no")
+
+# remove the key columns (username, timestamp, window) which are not predictors
+training_data_nokeycols = subset(training_data_nowindowsum, select =
+  (grep("^X|user|timestamp|window", names(training_data_nowindowsum), invert = TRUE)))
+
+# remove columns with no data
+training_data_full = subset(training_data_nokeycols, select =
+  (colSums(is.na(training_data_nokeycols)) == 0))
+
+# use columns the selected columns from training data
+test_data_selected_columns = names(training_data_full)
+
+# instead of "classe" column which is only in training data,
+# use "problem_id" which is only in test data
+test_data_selected_columns[53] <- "problem_id"
+
+# subset test data to have same columns as training (except for last one)
+test_data = subset(test_data_raw, select = test_data_selected_columns)
+```
+
+## Partitioning the Data
+
+The test data we have is without the class, those are the examples we want to predict.
+In order to use cross validation, we will now split the training data into training and validation data sets.
+
+```{r}
+# 75% training, 25% validation
+training_data_partition = createDataPartition(training_data_full$classe, p = 0.75, list = FALSE)
+training_data <- training_data_full[training_data_partition, ]
+validation_data <- training_data_full[-training_data_partition, ]
+```
+
+```{r}
+dim(training_data)
+```
+
+```{r}
+dim(validation_data)
+```
+
+```{r}
+dim(test_data)
+```
+
+```{r}
+names(training_data)
+```
+
+# Exploration
+
+Exploring the data and relationships in it is beyond the scope of this project, but still to get a little sense of how much most of our predictor variables are (not!) correlation, we can take a lok at correlation plot below.
+
+```{r}
+corrPlot <- cor(training_data[ , -length(names(training_data))])
+corrplot(corrPlot, method="shade", tl.cex = 0.5, tl.col = "black")
+```
+
+# Machine Learning Model
+
+For our model, we'll use the Random Forest algorithm, which automatically selects features, and overcomes correlations and outliers in the predictor variables.
+
+## Random Forest Model
+
+```{r}
+# it's better to run repeat cross-validation with multiple repeat
+# explanation and examples can be found here:
+# from here: https://topepo.github.io/caret/training.html
+# but it takes a very long time to run, so we'll settle for less here
+
+control <- trainControl(method = "cv", number = 3)
+
+system.time(model <- train(classe ~ ., data = training_data,
+                           method = "rf", prox = TRUE, trControl = control,
+                           allowParallel = TRUE))
+```
+
+Here's the random forest results:
+
+```{r}
+print(model)
+```
+
+Here's the final model selected:
+ 
+```{r}
+print(model$finalModel)
+```
+
+## Confusion Matrix
+
+Now let's see the confusion matrix on the validation data:
+
+```{r}
+validation_data_predict = predict(model, validation_data)
+
+confusionMatrix(validation_data$classe, validation_data_predict)
+```
+
+```{r}
+postResample(validation_data_predict, validation_data$classe)
+```
+
+98.9% accuracy - nice!
+
+## Model Predictions
+
+And finally, using the predictor on the test data:
+
+```{r}
+predict(model, test_data)
+```
+
+# References
+
+* Data at: ["Human Activity Recognition" dataset](http://groupware.les.inf.puc-rio.br/har) from [Groupware@LES](http://groupware.les.inf.puc-rio.br/)
+* Code at: [My GitHub repository](https://github.com/rmkn85/Coursera-PracticalMachineLearning/tree/gh-pages)
+* Report at: [Project Published in GitHub Pages](https://rmkn85.github.io/Coursera-PracticalMachineLearning/)
+* Assignment at: [Coursera Practical Machine Learning Coursa](https://www.coursera.org/learn/practical-machine-learning/)
+* Tips on R Markdown at: (R Markdown HTML Document Format)[http://rmarkdown.rstudio.com/html_document_format.html]
